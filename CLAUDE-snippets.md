@@ -2,6 +2,8 @@
 
 Copy these blocks yourself. The build did not change any CLAUDE.md. Install `cq` first (see `README.md`).
 
+Generic agent rules are also available in [docs/SESSION-RULES.example.md](docs/SESSION-RULES.example.md). Codex uses [docs/CODEX.md](docs/CODEX.md), not the Monitor or Bash permission instructions below.
+
 ## 1. User-level block
 
 Put this in `~/.claude/CLAUDE.md`. It is not synced across machines, so repeat it on each one.

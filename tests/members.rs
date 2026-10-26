@@ -185,3 +185,37 @@ fn leave_removes_the_record() {
     assert_eq!(code(&again), 0, "{}", stderr(&again));
     assert_eq!(code(&env.run(&["leave", "--as", "../x"], None)), 5);
 }
+
+#[test]
+fn generic_session_id_precedes_claude_and_empty_falls_back() {
+    let env = Env::new();
+    watch_once(
+        &env,
+        "codex",
+        &[
+            ("CQ_SESSION_ID", "codex:thread/1"),
+            (HOST, "local_old"),
+            (SESSION, "old"),
+        ],
+    );
+    assert_eq!(
+        member_name(&env, "codex_thread_1").as_deref(),
+        Some("codex")
+    );
+    assert!(!env.path("members/local_old").exists());
+    assert!(
+        stdout(&session_start(&env, &[("CQ_SESSION_ID", "codex:thread/1")])).contains("as codex")
+    );
+    watch_once(
+        &env,
+        "fallback",
+        &[("CQ_SESSION_ID", "  "), (HOST, "local_fallback")],
+    );
+    assert_eq!(
+        member_name(&env, "local_fallback").as_deref(),
+        Some("fallback")
+    );
+    let long = "x".repeat(90);
+    watch_once(&env, "long", &[("CQ_SESSION_ID", &long)]);
+    assert_eq!(member_name(&env, &"x".repeat(64)).as_deref(), Some("long"));
+}

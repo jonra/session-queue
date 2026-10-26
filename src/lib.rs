@@ -5,6 +5,7 @@
 //! check the message validator directly.
 
 pub mod claim;
+pub mod dispatch;
 pub mod done;
 pub mod error;
 pub mod fsutil;

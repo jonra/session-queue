@@ -2,6 +2,8 @@
 
 How to install `cq`, configure it and upgrade it. Back to the [README](../README.md).
 
+For Codex, use [Codex setup](CODEX.md). The steps below are for Claude Code. Shared queue configuration is listed below.
+
 ## Requirements
 
 - Claude Code with the Monitor tool. Tested in the Claude desktop app's Code tab.
@@ -54,10 +56,11 @@ macOS support is new. The code builds for macOS, but it has not yet been tested 
 
 ## Configuration
 
-All settings are environment variables. Set them before you start the Claude app (on Windows: Settings > System > About > Advanced system settings > Environment Variables > User variables).
+All settings are environment variables. Set queue-wide values before you start the Claude app (on Windows: Settings > System > About > Advanced system settings > Environment Variables > User variables).
 
 | Variable | What it sets | Default |
 | --- | --- | --- |
+| `CQ_SESSION_ID` | Per-command or dedicated session-process membership key, before either Claude identity variable. Never set one global value shared by Claude sessions. Empty values fall back. | None |
 | `CQ_ROOT` | The queue root. Must be an absolute path. | Windows: `%LOCALAPPDATA%\cq`. macOS: `~/Library/Application Support/cq`. Linux: `$XDG_DATA_HOME/cq` or `~/.local/share/cq`. |
 | `CQ_RULES` | The rules file that the rejoin reminder tells a session to re-read. | None: the reminder names the rules in general terms. |
 | `CQ_TZ` | The time zone of the local time in `CQ-NEW` lines (an IANA name such as `Europe/London`). | The system time zone. |

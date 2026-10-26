@@ -18,15 +18,16 @@ use crate::names::is_valid_name;
 use crate::root::Root;
 use crate::timefmt::{self, rfc3339};
 
-/// The Desktop app's `local_...` ID, which is meant to outlive `/clear`.
+/// Explicit agent-neutral identity, ahead of agent-specific fallbacks.
+pub const ENV_GENERIC_SESSION: &str = "CQ_SESSION_ID";
+/// The Claude Desktop app's `local_...` ID, intended to outlive `/clear`.
 pub const ENV_HOST_SESSION: &str = "CLAUDE_CODE_HOST_SESSION_ID";
 pub const ENV_SESSION: &str = "CLAUDE_CODE_SESSION_ID";
 pub const MAX_KEY_LEN: usize = 64;
 
-/// The member key for this process: `CLAUDE_CODE_HOST_SESSION_ID` if set
-/// and non-empty, else `CLAUDE_CODE_SESSION_ID`, else none.
+/// The first non-empty key: CQ_SESSION_ID, Claude host ID, Claude session ID.
 pub fn session_key() -> Option<String> {
-    [ENV_HOST_SESSION, ENV_SESSION]
+    [ENV_GENERIC_SESSION, ENV_HOST_SESSION, ENV_SESSION]
         .iter()
         .filter_map(|v| std::env::var(v).ok())
         .find_map(|v| sanitise_key(&v))

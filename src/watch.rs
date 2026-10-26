@@ -187,7 +187,7 @@ pub fn watch(root: &Root, opts: &WatchOptions, out: &mut impl Write) -> Result<(
 
 /// Take the exclusive lock on `heartbeat/<name>.lock`. The OS releases it
 /// when the process exits, however it exits.
-fn take_lock(root: &Root, name: &str, takeover: bool) -> Result<File> {
+pub(crate) fn take_lock(root: &Root, name: &str, takeover: bool) -> Result<File> {
     let path = root.lock_file(name);
     let file = fsutil::open_lock_file(&path)
         .map_err(|e| CqError::io(format!("open {}", path.display()), e))?;
@@ -205,7 +205,7 @@ fn take_lock(root: &Root, name: &str, takeover: bool) -> Result<File> {
     let old_text = old.map_or_else(|| "unknown process".to_owned(), |p| format!("process {p}"));
     if !takeover {
         return Err(CqError::refused(format!(
-            "a watcher for {name} is already running ({old_text}); use --takeover to replace it"
+            "a watcher or dispatcher for {name} is already running ({old_text}); use --takeover to replace it"
         )));
     }
     if let Some(p) = old.filter(|p| *p != std::process::id()) {
@@ -282,7 +282,7 @@ fn scan(
     Ok(())
 }
 
-fn heartbeat(root: &Root, name: &str) {
+pub(crate) fn heartbeat(root: &Root, name: &str) {
     let path = root.heartbeat(name);
     let text = format!("{}\n", rfc3339(timefmt::now()));
     if let Err(e) = fs::write(&path, text) {

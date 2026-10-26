@@ -77,7 +77,7 @@ rejected/ and dlq/, by the time stamp and sender in each file name.
     name = "cq",
     bin_name = "cq",
     version,
-    about = "File-based message queue for Claude Code sessions",
+    about = "File-based message queue for AI coding sessions",
     after_help = exit_help()
 )]
 struct Cli {
@@ -137,6 +137,35 @@ enum Cmd {
         /// Rely on the rescan alone (for tests).
         #[arg(long, hide = true)]
         no_fs_events: bool,
+    },
+
+    /// Run a fresh Codex task for each inbox message. Requires trusted scope
+    /// instructions and allowed senders. Does not wake an existing chat.
+    #[command(after_help = exit_help())]
+    Dispatch {
+        #[arg(long = "as", value_name = "NAME")]
+        name: String,
+        /// Absolute path to the Codex executable (not a shell command).
+        #[arg(long, value_name = "FILE")]
+        codex: PathBuf,
+        /// Absolute path to the repository Codex will work in.
+        #[arg(long, value_name = "DIR")]
+        workspace: PathBuf,
+        /// Trusted file defining allowed tasks, read once at startup.
+        #[arg(long, value_name = "FILE")]
+        instructions: PathBuf,
+        /// Allowed sender. Repeat for more names. Sender names are not authentication.
+        #[arg(long, required = true, value_name = "NAME")]
+        allow_from: Vec<String>,
+        /// Codex sandbox for this invocation. Never bypasses approvals.
+        #[arg(long, value_enum, default_value_t = cq::dispatch::Sandbox::ReadOnly)]
+        sandbox: cq::dispatch::Sandbox,
+        /// Stop and leave the task claimed if Codex exceeds this limit.
+        #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u64).range(1..))]
+        timeout_seconds: u64,
+        /// Process the current inbox, then exit. Under PAUSE, exit 5.
+        #[arg(long)]
+        once: bool,
     },
 
     /// Claim a message before working on it, and print its JSON.
@@ -296,6 +325,31 @@ fn run(cmd: Cmd) -> Result<()> {
                 member_key: members::session_key(),
             };
             watch::watch(&root, &opts, &mut io::stdout().lock())?;
+        }
+        Cmd::Dispatch {
+            name,
+            codex,
+            workspace,
+            instructions,
+            allow_from,
+            sandbox,
+            timeout_seconds,
+            once,
+        } => {
+            let root = Root::open()?;
+            cq::dispatch::dispatch(
+                &root,
+                &cq::dispatch::Options {
+                    name,
+                    codex,
+                    workspace,
+                    instructions,
+                    allow_from,
+                    sandbox,
+                    timeout: Duration::from_secs(timeout_seconds),
+                    once,
+                },
+            )?;
         }
         Cmd::Claim { name, id } => {
             let root = Root::open()?;
