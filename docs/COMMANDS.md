@@ -11,6 +11,7 @@ Every command has `--help`. Message text never goes on the command line: `send` 
 | `cq init` | Create the layout under `CQ_ROOT`. |
 | `cq send --from A --to B --type task\|result\|info [--reply-to ID] [--parent ID] [--status ok\|failed\|rejected] [--input FILE]` | Read `{"subject": "...", "body": "..."}`, write the message, print its ID. |
 | `cq watch --as B [--takeover] [--max-seconds 1790]` | Print one `CQ-NEW` line per new message. One watcher per name. |
+| `cq dispatch --as B --codex FILE --workspace DIR --instructions FILE --allow-from NAME [--allow-from NAME ...] [--sandbox read-only\|workspace-write] [--timeout-seconds 600] [--once]` | Run one fresh Codex process per task, serially. See [Codex setup](CODEX.md). |
 | `cq claim --as B ID` | Move the message to `.processing/` and print its JSON. |
 | `cq done --as B ID [--reply [--status ok\|failed] \| --reject] [--input FILE]` | Finish a claimed message. With no flag, sends no reply, and refuses (exit 64, nothing moved) if input is waiting on stdin. `--reply` reads `{"reply": "..."}` (tasks only); `--reject` reads `{"reason": "..."}`. |
 | `cq list --as B [--stale-minutes 60]` | List unclaimed, stale claimed and dead-lettered messages, oldest first. No bodies. |
@@ -54,11 +55,11 @@ The time is when the watcher saw the message: UTC first, then local time with it
 | 1 | `claim`: the message is no longer in the inbox (another claim won, or a duplicate event). Ignore it. |
 | 2 | A rename still failed after 3 retries over 1 second. |
 | 3 | `claim`: the message is invalid and went to `dlq/`. The sender was told, when known. |
-| 4 | `done`: the message is finished, but the reply was not sent. |
+| 4 | `done` or `dispatch` completion: the message is finished, but the reply was not sent. |
 | 5 | Refused: bad name, body over 20 KB, hop limit, a pair, recipient or sender limit, `PAUSE`, missing parent, a watcher already running, or `done --reply` on a `result` or `info`. |
 | 6 | `done`: the message is not claimed by this session. |
 | 64 | Bad arguments or bad JSON input, or `done` input without `--reply` or `--reject`. |
-| 70 | Any other error (I/O, `CQ_ROOT` missing or not initialised). |
+| 70 | Dispatch timeout/interruption (task stays claimed), or any other error (I/O, `CQ_ROOT` missing or not initialised). |
 
 
 ## Layout
@@ -71,9 +72,11 @@ CQ_ROOT/
   done/<name>/               finished messages (pruned after 14 days)
   rejected/<name>/           declined messages and reason files (pruned after 14 days)
   dlq/<name>/                invalid messages and reason files (never pruned)
-  heartbeat/<name>           time of the watcher's last heartbeat (every 30 s)
-  heartbeat/<name>.lock      locked by the running watcher
-  heartbeat/<name>.pid       the running watcher's process ID
+  heartbeat/<name>           time of the watcher/dispatcher heartbeat (every 30 s)
+  heartbeat/<name>.lock      locked by the running watcher or dispatcher
+  heartbeat/<name>.claim.lock serialises claims for this recipient
+  heartbeat/<name>.pid       the running watcher/dispatcher process ID
+  dispatch/<name>/<id>/       Codex logs and completion state (not auto-pruned)
   members/<key>              the name owned by a Claude Code session, and the UTC time it was recorded
   PAUSE                      while it exists, watchers print nothing and cq send refuses
 ```
@@ -81,3 +84,11 @@ CQ_ROOT/
 Message format: [`schema/message.v1.json`](../schema/message.v1.json). One file per message, `<id>.json`, UTF-8 without BOM. IDs are `<UTC yyyymmddThhmmssZ>-<from>-<4 hex>`. Readers ignore unknown fields.
 
 To stop all queue traffic at once, create a file named `PAUSE` in the queue root (for example `touch "$CQ_ROOT/PAUSE"`). While it exists, watchers announce nothing and every `cq send` is refused (exit 5). Remove the file to resume; waiting messages are then announced.
+
+## Codex dispatch
+
+`dispatch` requires an explicit executable, workspace, trusted scope file and sender allowlist. Paths must be absolute. It holds the same lock as `watch`; it has no takeover option. It scans every second, observes PAUSE, and handles the current inbox once with --once. Each task starts `codex exec` with stdin data, structured output, no interactive approvals and an explicit read-only (default) or workspace-write sandbox. Hooks and user configuration are disabled for that invocation. Info/result messages finish without starting Codex. Disallowed senders are rejected.
+
+Agent failures become failed results; a successfully delivered failed result leaves dispatch running (exit 0 with --once). Timeout/interruption leaves work claimed and exits 70. Completion failures preserve their existing cq exit code. Claimed tasks and unresolved dispatch records refuse restart with exit 5. See [recovery](CODEX.md#failure-handling-and-recovery) before restarting. No automatic retry occurs.
+
+A dispatcher waits for PAUSE to clear before completion if it appeared during a run. Its PID file allows an explicitly requested watch --takeover to stop it. Heartbeats occur at startup and every 30 seconds. A pre-existing job directory refuses the message before claim.

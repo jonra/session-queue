@@ -17,6 +17,20 @@ pub fn claim(root: &Root, name: &str, id: &str) -> Result<Vec<u8>> {
     check_id("ID", id)?;
     root.ensure_session_dirs(name)?;
 
+    // On Windows, two rename calls can both open the same source before
+    // either moves it, then both report success for the same destination.
+    // Serialise the claim transaction per recipient; never remove this lock
+    // file while another process could hold an open handle to it.
+    let claim_lock_path = root
+        .path()
+        .join("heartbeat")
+        .join(format!("{name}.claim.lock"));
+    let claim_lock =
+        fsutil::open_lock_file(&claim_lock_path).map_err(|e| CqError::io("open claim lock", e))?;
+    claim_lock
+        .lock()
+        .map_err(|e| CqError::io("lock claim transaction", e))?;
+
     let src = message_file(&root.inbox(name), id);
     let dst = message_file(&root.processing(name), id);
     match fsutil::move_with_retry(&src, &dst) {

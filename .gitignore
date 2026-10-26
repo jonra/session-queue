@@ -12,3 +12,10 @@ docs/QUEUE-NAMES.md
 docs/SESSION-RULES.md
 docs/drafts/
 soak-harness/
+
+# Local Codex experiments and isolated queues
+/CODEX-FINDINGS.md
+/scratch/
+/build/
+/build-codex/
+/test-root/

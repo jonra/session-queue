@@ -317,3 +317,217 @@ mod imp {
         Ok(())
     }
 }
+
+/// An owned agent process. Windows keeps the non-inheritable job handle only
+/// in the dispatcher, so even forced dispatcher termination kills the tree.
+pub struct Agent {
+    pub child: std::process::Child,
+    #[cfg(windows)]
+    job: std::os::windows::io::OwnedHandle,
+}
+
+#[cfg(windows)]
+mod agent_windows {
+    use std::io;
+    use std::mem::{size_of, zeroed};
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use std::os::windows::process::CommandExt;
+    use std::ptr::null;
+    use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+    };
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
+    };
+    use windows_sys::Win32::System::Threading::{
+        CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CREATE_SUSPENDED, OpenThread, ResumeThread,
+        THREAD_SUSPEND_RESUME,
+    };
+
+    fn owned(handle: HANDLE) -> io::Result<OwnedHandle> {
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            Err(io::Error::last_os_error())
+        } else {
+            // SAFETY: successful Win32 call returned a new owned handle.
+            Ok(unsafe { OwnedHandle::from_raw_handle(handle) })
+        }
+    }
+
+    // Stable Rust cannot access Child's primary thread handle. A process
+    // created suspended has not run any user code; enumerate its initial
+    // thread and resume it only after successful job assignment.
+    fn resume(pid: u32) -> io::Result<()> {
+        // SAFETY: creates a thread snapshot; it is closed by OwnedHandle.
+        let snapshot = owned(unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) })?;
+        // SAFETY: THREADENTRY32 is a plain Win32 output structure.
+        let mut entry: THREADENTRY32 = unsafe { zeroed() };
+        entry.dwSize = size_of::<THREADENTRY32>() as u32;
+        // SAFETY: snapshot and output pointer are valid.
+        let mut found = unsafe { Thread32First(snapshot.as_raw_handle(), &mut entry) };
+        while found != 0 {
+            if entry.th32OwnerProcessID == pid {
+                // SAFETY: opens only the suspended child's thread.
+                let thread =
+                    owned(unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) })?;
+                // SAFETY: thread is an owned handle with suspend/resume access.
+                let previous = unsafe { ResumeThread(thread.as_raw_handle()) };
+                if previous == u32::MAX {
+                    return Err(io::Error::last_os_error());
+                }
+                // A running helper thread is not proof that the suspended
+                // primary thread resumed. Continue until a suspended thread ran.
+                if previous > 0 {
+                    return Ok(());
+                }
+            }
+            // SAFETY: snapshot and output pointer remain valid.
+            found = unsafe { Thread32Next(snapshot.as_raw_handle(), &mut entry) };
+        }
+        Err(io::Error::other("could not find suspended agent thread"))
+    }
+
+    pub fn spawn(command: &mut std::process::Command) -> io::Result<super::Agent> {
+        // SAFETY: null security attributes make the job non-inheritable;
+        // null name prevents any other process opening it by name.
+        let job = owned(unsafe { CreateJobObjectW(null(), null()) })?;
+        // SAFETY: plain Win32 configuration structure, zero is valid initially.
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // SAFETY: live job and correctly sized configuration buffer.
+        if unsafe {
+            SetInformationJobObject(
+                job.as_raw_handle(),
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                size_of_val(&limits) as u32,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | CREATE_SUSPENDED);
+        let mut child = command.spawn()?;
+        // SAFETY: Child owns a live process handle. No agent code has run.
+        if unsafe { AssignProcessToJobObject(job.as_raw_handle(), child.as_raw_handle()) } == 0 {
+            let error = io::Error::last_os_error();
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+        if let Err(error) = resume(child.id()) {
+            drop(job); // Kills the still-suspended process before returning.
+            let _ = child.wait();
+            return Err(error);
+        }
+        Ok(super::Agent { child, job })
+    }
+}
+
+pub fn spawn_agent(command: &mut std::process::Command) -> std::io::Result<Agent> {
+    #[cfg(windows)]
+    {
+        agent_windows::spawn(command)
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+        command.spawn().map(|child| Agent { child })
+    }
+}
+
+/// Stop the owned job/process group, even if its original process just exited.
+/// No taskkill invocation or process-ID lookup can race with process exit.
+pub fn stop_agent(agent: &mut Agent) -> Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        // SAFETY: the job handle stays owned by Agent throughout this call.
+        if unsafe {
+            windows_sys::Win32::System::JobObjects::TerminateJobObject(agent.job.as_raw_handle(), 1)
+        } == 0
+        {
+            return Err(CqError::io(
+                "stop agent job",
+                std::io::Error::last_os_error(),
+            ));
+        }
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: spawn_agent made this child's PID its process group ID.
+        if unsafe { libc::kill(-(agent.child.id() as i32), libc::SIGKILL) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(CqError::io("stop agent process group", error));
+            }
+        }
+    }
+    agent
+        .child
+        .wait()
+        .map_err(|e| CqError::io("reap agent", e))?;
+    Ok(())
+}
+
+static DISPATCH_INTERRUPTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+pub fn dispatch_interrupted() -> bool {
+    DISPATCH_INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn install_dispatch_interrupt_handler() -> Result<()> {
+    DISPATCH_INTERRUPTED.store(false, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(windows)]
+    {
+        unsafe extern "system" fn on_interrupt(kind: u32) -> i32 {
+            if kind <= 2 {
+                DISPATCH_INTERRUPTED.store(true, std::sync::atomic::Ordering::Relaxed);
+                1
+            } else {
+                0
+            }
+        }
+        // SAFETY: static handler only writes an atomic flag; no borrowed state.
+        if unsafe {
+            windows_sys::Win32::System::Console::SetConsoleCtrlHandler(Some(on_interrupt), 1)
+        } == 0
+        {
+            return Err(CqError::io(
+                "install dispatch interrupt handler",
+                std::io::Error::last_os_error(),
+            ));
+        }
+    }
+    #[cfg(unix)]
+    {
+        extern "C" fn on_interrupt(_: libc::c_int) {
+            DISPATCH_INTERRUPTED.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        // SAFETY: static signal handler only writes an atomic flag.
+        unsafe {
+            if libc::signal(
+                libc::SIGINT,
+                on_interrupt as *const () as libc::sighandler_t,
+            ) == libc::SIG_ERR
+                || libc::signal(
+                    libc::SIGTERM,
+                    on_interrupt as *const () as libc::sighandler_t,
+                ) == libc::SIG_ERR
+                || libc::signal(
+                    libc::SIGHUP,
+                    on_interrupt as *const () as libc::sighandler_t,
+                ) == libc::SIG_ERR
+            {
+                return Err(CqError::io(
+                    "install dispatch signal handler",
+                    std::io::Error::last_os_error(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}

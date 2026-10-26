@@ -49,3 +49,19 @@ Implementation choices that the specification left open, and what `cq` does. The
 ## Dependencies
 
 - clap, serde, serde_json, jiff (time zones; the bundled database on Windows), notify, windows-sys (Windows), libc (macOS and Linux). Tests: jsonschema (without default features, to avoid a network client build) and tempfile.
+
+## Codex dispatcher
+
+- `dispatch` is a serial polling worker, not a Monitor replacement. One-second inbox scans find startup and later messages; it shares the watcher lock. A separate Codex process handles each task, with no prior conversation history.
+- An explicit sender allowlist and a trusted local scope file are required. Sender names remain a soft filter. Queue bodies cannot select executables, flags or the scope file. Codex reads the target repository's AGENTS.md.
+- The dispatcher invokes Codex directly, without a shell. Prompt data goes through a file on stdin. Structured final output carries status and reply. Event logs and stderr are files, so a full output pipe cannot deadlock a worker.
+- Defaults are read-only sandboxing, no interactive approvals, ephemeral runs and invocation-local disabling of hooks and user configuration. A worker can explicitly select workspace-write. Existing saved authentication is reused.
+- `dispatch/NAME/ID` retains prompts, output and completion records. The intended completion is written before `done`; incomplete records block restart. Records are not pruned automatically.
+- Failed agent exits and invalid or oversized answers yield bounded failed results. Timeouts and interrupted active tasks stop the agent process tree, leave the task claimed and stop the dispatcher. Windows uses a non-inheritable kill-on-close Job Object, assigned before the suspended agent resumes. Forced dispatcher death closes the job and stops the tree. Unix SIGHUP/SIGINT/SIGTERM stop the agent process group; SIGKILL on Unix can leave a child running. An operator must review before recovery. Tasks are never automatically replayed.
+- Completion exit 4 stops with the task already moved. No reply retry occurs automatically, because a crash near completion can make delivery uncertain. Recovery must inspect the saved completion and sender queue. Exactly-once side effects are not promised.
+- The session membership key is the first non-empty CQ_SESSION_ID, CLAUDE_CODE_HOST_SESSION_ID or CLAUDE_CODE_SESSION_ID, with the existing sanitisation and 64-character cap. Codex variables are not read implicitly. The dispatcher does not register its parent chat, and clears inherited session IDs for each fresh child.
+
+- The dispatcher reserves each job directory before claiming; a collision refuses the job without claiming the inbox message. It writes its PID while holding the watcher lock, removes its own PID on normal exit, and shares a single 30-second heartbeat schedule across idle scans, agent execution and PAUSE waits.
+- When PAUSE appears during a task, the dispatcher retains its answer and waits before calling done. Interruption leaves the task claimed. PAUSE can still race with completion after the final check; a resulting exit 4 remains an operator recovery case.
+
+- Claims take a separate OS lock at heartbeat/NAME.claim.lock for the move and validation transaction. Windows can otherwise report two successful renames when both callers opened the same source before it moved. The second claimant checks the inbox after the first transaction and exits 1. The lock file is retained; deleting it while held could let a new file bypass the lock.

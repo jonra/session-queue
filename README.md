@@ -1,6 +1,6 @@
-# cq: a message queue for Claude Code sessions
+# cq: a message queue for AI coding sessions
 
-`cq` lets Claude Code sessions on one computer pass work to each other with no person in the loop. Each message is one JSON file in a shared folder. Each session runs `cq watch` under Claude Code's Monitor tool, and the watcher wakes the session when a message arrives.
+`cq` lets AI coding sessions on one computer pass work to each other with no person in the loop. Each message is one JSON file in a shared folder. Claude Code uses `cq watch` under its Monitor tool. Codex workers use `cq dispatch` to start a fresh task run for each message.
 
 ## Why
 
@@ -18,7 +18,11 @@ With `cq`, a message reaches the receiving session as a Monitor event instead. I
 - **Rejoin after `/clear`.** A SessionStart hook reminds a cleared session of its queue name and restarts its watcher.
 - **Plain files.** No server, no database and no network. You can inspect the queue with `ls` and `cat`.
 
-## Quick start
+## Codex
+
+`cq dispatch` runs one fresh Codex task per message. It requires trusted scope rules and allowed senders, handles replies, and stops for review after uncertain completion. Start with [Codex setup](docs/CODEX.md). Claude Code continues to use its Monitor workflow.
+
+## Quick start (Claude Code)
 
 You need Claude Code with the Monitor tool, stable Rust, and Windows (with Git Bash) or macOS. macOS support is new and not yet tested on a Mac.
 
@@ -37,10 +41,16 @@ EOF
 
 The full steps, including the rejoin hook, are in [Setup](docs/SETUP.md).
 
+## Configuration
+
+Every session must use the same absolute CQ_ROOT. [Setup configuration](docs/SETUP.md#configuration) lists queue settings. Adapt the [example session rules](docs/SESSION-RULES.example.md) into your private CQ_RULES file; do not replace a shared file with one fixed session identity.
+
 ## Documentation
 
 | Document | What it covers |
 | --- | --- |
+| [Codex setup](docs/CODEX.md) | Native dispatcher, scope rules, shell examples and recovery |
+| [Generic rules](docs/SESSION-RULES.example.md) | Queue rules for any coding agent |
 | [Setup](docs/SETUP.md) | Requirements, install steps, configuration, upgrading |
 | [`CLAUDE-snippets.md`](CLAUDE-snippets.md) | CLAUDE.md blocks and session prompts to paste |
 | [Session protocol](docs/PROTOCOL.md) | How a session watches, claims, replies and rejoins; send limits |

@@ -20,7 +20,7 @@ How a Claude Code session uses `cq`: owning a name, keeping the watcher armed, h
 
 After `/clear` or a compaction, a session forgets its queue name and rules, so it stops claiming messages and re-arming its watcher. `cq` remembers the owner of each name:
 
-- When `cq watch --as NAME` takes the lock, it writes `members/<key>` (the name, then the UTC time). The key is `CLAUDE_CODE_HOST_SESSION_ID` (the Desktop app's `local_...` ID) if set and non-empty, else `CLAUDE_CODE_SESSION_ID`. With neither, nothing is written. Characters outside `[A-Za-z0-9_-]` become `_`, and the key is cut to 64 characters.
+- When `cq watch --as NAME` takes the lock, it writes `members/<key>` (the name, then the UTC time). The key is `CQ_SESSION_ID` if set and non-empty, else `CLAUDE_CODE_HOST_SESSION_ID` (the Desktop app's `local_...` ID) if set and non-empty, else `CLAUDE_CODE_SESSION_ID`. With neither, nothing is written. Characters outside `[A-Za-z0-9_-]` become `_`, and the key is cut to 64 characters.
 - A name belongs to one session at a time: recording NAME removes any other key's record of NAME.
 - `cq session-start` runs from the SessionStart hook ([Setup](SETUP.md) step 8). If the session's key owns a name, it prints a reminder, which Claude Code adds to the new context: re-read its session rules (the file named by `CQ_RULES`, if set) as NAME, start the watcher Monitor (with `--takeover` if it exits 5), then run `cq list` and handle any `UNCLAIMED` messages. Otherwise it prints nothing.
 - `cq session-start` always exits 0 and writes nothing to stderr (except with `--debug`). It finds the key from the environment only. It drains the hook's JSON from stdin without using it, and waits at most 100 ms for an empty open pipe and 100 ms more for a pipe that holds bytes but never closes. It needs no `cq init`: an uninitialised root gives no output.
@@ -43,3 +43,7 @@ After `/clear` or a compaction, a session forgets its queue name and rules, so i
 | `PAUSE` | while `CQ_ROOT/PAUSE` exists, every send is refused |
 
 The limits also apply to the results that `cq done --reply`, `cq done --reject` and `cq claim` (DLQ notice) send. Invalid messages go to the DLQ instead of looping.
+
+## Codex workers
+
+See [Codex setup](CODEX.md). A dispatcher owns claim and completion; its Codex child must not claim, reply or finish on its own. Generic agent rules are in [SESSION-RULES.example.md](SESSION-RULES.example.md). The dispatcher handles tasks serially, finishes info/results without replies, and refuses to replay claimed or unresolved work. Stop and review its logs after a timeout or completion error. The Claude SessionStart reminder is not a Codex wake mechanism.

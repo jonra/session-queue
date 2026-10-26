@@ -52,6 +52,7 @@ impl Env {
             .env("CQ_TZ", "Europe/London")
             .env("CQ_TZ_LABEL", "UK")
             .env("CQ_RULES", RULES)
+            .env_remove("CQ_SESSION_ID")
             .env_remove("CLAUDE_CODE_SESSION_ID")
             .env_remove("CLAUDE_CODE_HOST_SESSION_ID");
         c

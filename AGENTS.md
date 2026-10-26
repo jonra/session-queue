@@ -1,10 +1,10 @@
 # Instructions for AI coding agents
 
-These rules are for agents that change the `cq` code or docs. Agents that only *use* the queue follow [`CLAUDE-snippets.md`](CLAUDE-snippets.md) instead. People: see [`CONTRIBUTING.md`](CONTRIBUTING.md).
+These rules are for agents that change the `cq` code or docs. Agents that only *use* the queue follow [`docs/SESSION-RULES.example.md`](docs/SESSION-RULES.example.md) and the setup page for their agent instead. People: see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## What this is
 
-`cq` is a Rust CLI that passes messages between Claude Code sessions on one computer. Each message is one JSON file under a queue root. Start with [`README.md`](README.md); behaviour is specified in [`docs/COMMANDS.md`](docs/COMMANDS.md) and [`docs/DESIGN.md`](docs/DESIGN.md).
+`cq` is a Rust CLI that passes messages between AI coding sessions on one computer. Each message is one JSON file under a queue root. Start with [`README.md`](README.md); behaviour is specified in [`docs/COMMANDS.md`](docs/COMMANDS.md) and [`docs/DESIGN.md`](docs/DESIGN.md).
 
 ## Checks
 

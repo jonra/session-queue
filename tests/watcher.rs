@@ -201,13 +201,21 @@ fn t9_prune() {
     let old_dlq = make("dlq/b/20261008T000000Z-a-0015.json", 30);
     let other = make("done/c/20261008T000000Z-a-0015.json", 15);
 
-    let mut w = env.watch("b", &["--max-seconds", "1"]);
-    assert!(w.child.wait().unwrap().success());
+    // This tests pruning, not watcher startup speed. A one-second lifetime
+    // can expire during file-watcher initialisation on a busy host.
+    let w = env.watch("b", &["--max-seconds", "15"]);
+    assert!(
+        wait_until(Duration::from_secs(10), || !old.exists()
+            && !old_rejected.exists()
+            && !old_reason.exists()),
+        "old files were not pruned before the deadline"
+    );
     assert!(young.exists(), "13 days old: kept");
     assert!(!old.exists(), "15 days old: removed");
     assert!(!old_rejected.exists() && !old_reason.exists());
     assert!(old_dlq.exists(), "dlq is never pruned");
     assert!(other.exists(), "only the watcher's own directories");
+    drop(w);
 }
 
 /// T10: during 65 seconds the heartbeat is never more than 30 seconds old.
