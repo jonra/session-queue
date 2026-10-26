@@ -1,0 +1,35 @@
+[package]
+name = "cq"
+version = "1.0.0"
+edition = "2024"
+description = "File-based message queue for Claude Code sessions"
+license = "MIT"
+publish = false
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+jiff = "0.2.38"
+notify = "8.2.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+[target."cfg(unix)".dependencies]
+libc = "0.2.191"
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_Threading"] }
+
+[dev-dependencies]
+jsonschema = { version = "0.60.1", default-features = false }
+tempfile = "3.27.0"
+
+[[bin]]
+name = "cq"
+path = "src/main.rs"
+
+[lib]
+name = "cq"
+path = "src/lib.rs"
+
+[profile.release]
+strip = true

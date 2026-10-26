@@ -1,0 +1,313 @@
+//! `cq watch`: print one `CQ-NEW` line per new message in an inbox.
+//!
+//! Runs under a Claude Code Monitor, which wakes the session on each line.
+//! One watcher per name, held by an OS file lock. The watcher exits on its
+//! own before the Monitor's 30-minute cap, so an expired Monitor does not
+//! leave a long-lived orphan behind; `--takeover` replaces one sooner.
+//! With a session key, the watcher also records which Claude Code session
+//! owns the name (see `members`).
+//!
+//! There is no parent-process check. Under Git Bash the parent of `cq.exe`
+//! is a forked bash whose lifetime Cygwin controls, not the Monitor, and the
+//! check was the only path that could end a watcher with exit 0 and no
+//! output while its Monitor still ran.
+
+use std::collections::HashSet;
+use std::fs::{self, File, TryLockError};
+use std::io::{self, Write};
+use std::path::Path;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread::sleep;
+use std::time::{Duration, Instant, SystemTime};
+
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+
+use crate::error::{CqError, Result};
+use crate::fsutil;
+use crate::members;
+use crate::message::{EVENT_SUBJECT_MAX, event_text, header};
+use crate::names::{check_name, is_valid_id};
+use crate::platform;
+use crate::root::{Root, message_file};
+use crate::timefmt::{self, local_hhmm, rfc3339};
+
+pub const DEFAULT_MAX_SECONDS: u64 = 1790;
+pub const DEFAULT_RESCAN_SECONDS: u64 = 60;
+const HEARTBEAT_EVERY: Duration = Duration::from_secs(30);
+const PRUNE_EVERY: Duration = Duration::from_secs(3600);
+const PRUNE_AFTER: Duration = Duration::from_secs(14 * 24 * 3600);
+/// Rescan interval when file-system events are not available.
+const FALLBACK_RESCAN: Duration = Duration::from_secs(5);
+/// How often the loop checks the clock and `PAUSE`.
+const TICK: Duration = Duration::from_millis(250);
+/// How long `--takeover` waits for the old watcher to release the lock.
+const TAKEOVER_WAIT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone)]
+pub struct WatchOptions {
+    pub name: String,
+    pub takeover: bool,
+    pub max_seconds: u64,
+    /// Full rescan interval. 60 seconds; shorter in tests.
+    pub rescan: Duration,
+    /// File-system events through `notify`. Off in tests that check the
+    /// rescan on its own.
+    pub fs_events: bool,
+    /// The Claude Code session to record as the owner of the name. `None`
+    /// records nothing.
+    pub member_key: Option<String>,
+}
+
+impl WatchOptions {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            takeover: false,
+            max_seconds: DEFAULT_MAX_SECONDS,
+            rescan: Duration::from_secs(DEFAULT_RESCAN_SECONDS),
+            fs_events: true,
+            member_key: None,
+        }
+    }
+}
+
+/// Run the watcher until `--max-seconds`, or until `out` can no longer be
+/// written. Each of these is a normal exit, and each prints one line to
+/// stderr saying why, so an exit is never silent.
+pub fn watch(root: &Root, opts: &WatchOptions, out: &mut impl Write) -> Result<()> {
+    let name = opts.name.as_str();
+    check_name("--as", name)?;
+    root.ensure_session_dirs(name)?;
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(opts.max_seconds);
+
+    let _lock = take_lock(root, name, opts.takeover)?;
+    let pid = std::process::id();
+    let pid_file = root.pid_file(name);
+    fsutil::write_atomic(&root.tmp(), &pid_file, format!("{pid}\n").as_bytes())
+        .map_err(|e| CqError::io(format!("write {}", pid_file.display()), e))?;
+    if let Some(key) = &opts.member_key {
+        // The queue still works without the record; only a rejoin after
+        // `/clear` needs it.
+        if let Err(e) = members::record(root, key, name) {
+            eprintln!("cq watch: could not record the session for {name}: {e}");
+        }
+    }
+
+    let inbox = root.inbox(name);
+    let (_fs_watcher, mut events, mut rescan) = if opts.fs_events {
+        match start_fs_events(&inbox) {
+            Ok((w, rx)) => (Some(w), Some(rx), opts.rescan),
+            Err(e) => {
+                eprintln!(
+                    "cq watch: file-system events unavailable ({e}); rescanning every {}s",
+                    FALLBACK_RESCAN.as_secs()
+                );
+                (None, None, opts.rescan.min(FALLBACK_RESCAN))
+            }
+        }
+    } else {
+        (None, None, opts.rescan)
+    };
+
+    let mut announced: HashSet<String> = HashSet::new();
+    let mut pending = true; // the start scan
+    let mut was_paused = false;
+    let mut next_rescan = started + rescan;
+    let mut next_heartbeat = started;
+    let mut next_prune = started;
+
+    let reason = loop {
+        let now = Instant::now();
+        if now >= deadline {
+            break format!("--max-seconds {} reached", opts.max_seconds);
+        }
+        if now >= next_heartbeat {
+            heartbeat(root, name);
+            next_heartbeat = now + HEARTBEAT_EVERY;
+        }
+        if now >= next_prune {
+            prune(&root.done(name));
+            prune(&root.rejected(name));
+            next_prune = now + PRUNE_EVERY;
+        }
+        if now >= next_rescan {
+            pending = true;
+            next_rescan = now + rescan;
+        }
+
+        let paused = root.pause().exists();
+        if was_paused && !paused {
+            pending = true;
+        }
+        was_paused = paused;
+        if pending && !paused {
+            pending = false;
+            if let Err(e) = scan(root, name, &mut announced, out) {
+                // Nobody reads the output any more.
+                break format!("stdout can no longer be written ({e})");
+            }
+        }
+
+        let wait = TICK.min(deadline.saturating_duration_since(Instant::now()));
+        let stopped = match &events {
+            Some(rx) => match rx.recv_timeout(wait) {
+                Ok(()) => {
+                    pending = true;
+                    while rx.try_recv().is_ok() {}
+                    false
+                }
+                Err(RecvTimeoutError::Timeout) => false,
+                Err(RecvTimeoutError::Disconnected) => true,
+            },
+            None => {
+                sleep(wait);
+                false
+            }
+        };
+        if stopped {
+            eprintln!(
+                "cq watch: file-system events stopped; rescanning every {}s",
+                FALLBACK_RESCAN.as_secs()
+            );
+            events = None;
+            rescan = rescan.min(FALLBACK_RESCAN);
+            next_rescan = next_rescan.min(Instant::now() + rescan);
+        }
+    };
+
+    // Leave the pid file to a watcher that took over.
+    if fs::read_to_string(&pid_file).is_ok_and(|s| s.trim() == pid.to_string()) {
+        let _ = fs::remove_file(&pid_file);
+    }
+    // Ignore a failed write: stderr may be the same closed pipe as stdout.
+    let _ = writeln!(io::stderr(), "cq watch: exiting: {reason}");
+    Ok(())
+}
+
+/// Take the exclusive lock on `heartbeat/<name>.lock`. The OS releases it
+/// when the process exits, however it exits.
+fn take_lock(root: &Root, name: &str, takeover: bool) -> Result<File> {
+    let path = root.lock_file(name);
+    let file = fsutil::open_lock_file(&path)
+        .map_err(|e| CqError::io(format!("open {}", path.display()), e))?;
+    match file.try_lock() {
+        Ok(()) => return Ok(file),
+        Err(TryLockError::WouldBlock) => {}
+        Err(TryLockError::Error(e)) => {
+            return Err(CqError::io(format!("lock {}", path.display()), e));
+        }
+    }
+
+    let old = fs::read_to_string(root.pid_file(name))
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok());
+    let old_text = old.map_or_else(|| "unknown process".to_owned(), |p| format!("process {p}"));
+    if !takeover {
+        return Err(CqError::refused(format!(
+            "a watcher for {name} is already running ({old_text}); use --takeover to replace it"
+        )));
+    }
+    if let Some(p) = old.filter(|p| *p != std::process::id()) {
+        platform::terminate(p)?;
+    }
+    let until = Instant::now() + TAKEOVER_WAIT;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(TryLockError::WouldBlock) if Instant::now() < until => {
+                sleep(Duration::from_millis(100));
+            }
+            Err(TryLockError::WouldBlock) => {
+                return Err(CqError::refused(format!(
+                    "--takeover: the old watcher for {name} ({old_text}) still holds the lock after {}s",
+                    TAKEOVER_WAIT.as_secs()
+                )));
+            }
+            Err(TryLockError::Error(e)) => {
+                return Err(CqError::io(format!("lock {}", path.display()), e));
+            }
+        }
+    }
+}
+
+/// Any change in the inbox triggers a scan; the scan decides what is new.
+fn start_fs_events(inbox: &Path) -> notify::Result<(RecommendedWatcher, Receiver<()>)> {
+    let (tx, rx) = mpsc::channel();
+    let mut w = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if res.is_ok() {
+            let _ = tx.send(());
+        }
+    })?;
+    w.watch(inbox, RecursiveMode::NonRecursive)?;
+    Ok((w, rx))
+}
+
+/// Announce each message in the inbox that has not been announced yet,
+/// oldest first. Forgets messages that have left the inbox.
+fn scan(
+    root: &Root,
+    name: &str,
+    announced: &mut HashSet<String>,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    let inbox = root.inbox(name);
+    let present = fsutil::json_stems(&inbox, is_valid_id);
+    announced.retain(|id| present.binary_search(id).is_ok());
+    for id in present {
+        if announced.contains(&id) {
+            continue;
+        }
+        let bytes = match fsutil::read_with_retry(&message_file(&inbox, &id)) {
+            Ok(b) => b,
+            // Claimed since the directory was listed.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            // Announce it anyway; `cq claim` decides what happens to it.
+            Err(_) => Vec::new(),
+        };
+        let h = header(&bytes);
+        let now = timefmt::now();
+        writeln!(
+            out,
+            "CQ-NEW {} ({}) to={name} from={} type={} id={id} subject={}",
+            rfc3339(now),
+            local_hhmm(now),
+            h.from,
+            h.kind,
+            event_text(&h.subject, EVENT_SUBJECT_MAX)
+        )?;
+        out.flush()?;
+        announced.insert(id);
+    }
+    Ok(())
+}
+
+fn heartbeat(root: &Root, name: &str) {
+    let path = root.heartbeat(name);
+    let text = format!("{}\n", rfc3339(timefmt::now()));
+    if let Err(e) = fs::write(&path, text) {
+        eprintln!("cq watch: could not write {}: {e}", path.display());
+    }
+}
+
+/// Delete files older than 14 days. Used for `done/` and `rejected/`, never
+/// for `dlq/`.
+fn prune(dir: &Path) {
+    let Ok(rd) = fs::read_dir(dir) else {
+        return;
+    };
+    let now = SystemTime::now();
+    for entry in rd.filter_map(|e| e.ok()) {
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let old = meta
+            .modified()
+            .ok()
+            .and_then(|m| now.duration_since(m).ok())
+            .is_some_and(|age| age > PRUNE_AFTER);
+        if meta.is_file() && old {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}

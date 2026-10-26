@@ -1,0 +1,14 @@
+target/
+data/
+soak/
+
+# Local build settings (your own default paths)
+.cargo/config.toml
+
+# Private working notes and local queue rules, kept on disk but not published
+docs/BUILD-BRIEF.md
+docs/PROMPTS.md
+docs/QUEUE-NAMES.md
+docs/SESSION-RULES.md
+docs/drafts/
+soak-harness/
