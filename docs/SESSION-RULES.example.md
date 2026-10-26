@@ -30,6 +30,8 @@ Codex uses cq dispatch instead of Monitor. Give it its own queue name, trusted s
 
 ## Sending work
 
+Track work in your issue tracker (for example GitHub issues). Use cq only for alerts, pointers to an issue, and short questions that need no record. When a repo keeps its record elsewhere, write the record there first, then send the link by cq.
+
 Use task for work that needs a reply. Use info for a notice. Send partial work with --parent ID from a message you claimed, so the hop count carries over. Do not create reply loops by replying to result or info.
 
 Example Bash input (set CQ_ROOT and use the executable required by your setup):
