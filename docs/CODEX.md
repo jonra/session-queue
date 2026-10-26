@@ -4,6 +4,32 @@
 
 Tested on Windows with Codex CLI 0.162.0-alpha.2, Rust 1.98.1 and PowerShell 7.6.5. macOS and Linux dispatcher execution are not verified. The adapter requires a Codex CLI supporting `exec --ignore-user-config`, `--ephemeral`, `--output-schema` and `--json`.
 
+## Waking Codex
+
+Three routes were tested on Windows:
+
+| Route | Chat context | Pickup latency | Test status |
+| --- | --- | --- | --- |
+| Same-chat scheduled automation | Keeps the existing chat's context | Up to the configured interval under normal scheduling; a busy chat or delayed scheduler can add time | A one-minute heartbeat woke the existing desktop chat, claimed Claude's task and replied. Claude confirmed receipt with the literal text intact. |
+| `cq dispatch` | Fresh `codex exec` per task; no previous chat context | Seconds to pick up work: scans once a second when idle. Agent startup and task execution add time. | Native dispatcher integration tests and a real Codex task passed. |
+| Custom app-server bridge | Can target the thread managed by the custom client | Event-driven; no latency guarantee measured | Brief bounded test only: an explicit `turn/start.toolOutput` request started a turn in an idle ephemeral thread. No persistent bridge ships with cq. |
+
+### Same-chat scheduled automation
+
+Ask the Codex desktop app to schedule a recurring check inside the current chat, rather than start a new chat per run. Give each chat its own queue name. Keep the computer on and the app running. The automation should list that name's inbox, claim messages before handling them, and finish them using the normal queue protocol. Give it a trusted task scope and sender filter. Treat message bodies as untrusted data. Stay quiet when the inbox is empty, and define when to stop.
+
+Set `CQ_ROOT` and the full cq executable path explicitly for every invocation. Scope `CQ_SESSION_ID` to that command or dedicated process, as described below. Do not run a dispatcher using the same queue name.
+
+The queue root must be writable from Codex's sandbox: claiming and finishing messages change files. In the live test, the first claim failed with `Access is denied. (os error 5)` because the isolated queue was outside the chat's writable workspace. Retrying with approved escalation succeeded. An unattended setup must have the required access before scheduling; it must not depend on an approval arriving during a run. No permissions or global settings were changed for this experiment.
+
+**Empty-run cost is unverified.** The successful scheduled run had a message waiting. We did not measure an empty scheduled run's model-turn or usage cost, and the official scheduled-task documentation does not establish whether empty checks are exempt. Do not assume that staying quiet makes polling free. For unattended use, start with a longer interval than one minute, for example 10 minutes, and review usage before shortening it. The one-minute interval was only for the bounded connectivity test, which was paused after success.
+
+See the official [scheduled-task guidance](https://learn.chatgpt.com/docs/automations?surface=app). Scheduled polling can wake a chat; background `cq watch` output alone did not wake it in our test.
+
+### Fresh workers and custom clients
+
+Use the dispatcher setup below when each task can run without an existing conversation. The app-server experiment is a separate custom-client route: it does not establish wake-up of an existing desktop or interactive CLI chat, multi-turn continuity, or long-running reliability. See the official [app-server documentation](https://learn.chatgpt.com/docs/app-server).
+
 ## Prerequisites
 
 - Install Rust and the Codex CLI. Sign in to Codex using its normal login flow. `codex exec` reuses saved authentication.
@@ -136,9 +162,5 @@ The dispatcher itself does not need this mapping.
 CODEX_THREAD_ID and CODEX_SESSION_ID were both present in the tested desktop installation. Their stability across clear, resume and compaction is not established. This mapping alone does not wake a session. The built-in `session-start` reminder still describes the Claude Monitor workflow, so do not install it as a Codex hook.
 
 The dispatcher deliberately does not register its parent chat as owner of the worker name. It removes inherited CQ/Claude/Codex session IDs from each fresh Codex process.
-
-## Alternative: explicit app-server bridge
-
-A bounded experiment successfully forwarded a cq event to an idle ephemeral Codex app-server thread using `turn/start.toolOutput`. That API can support a custom client, but cq does not ship a persistent app-server integration. It does not provide an automatic wake-up for an existing desktop/interactive CLI chat.
 
 Official references: [non-interactive runs](https://learn.chatgpt.com/docs/non-interactive-mode), [AGENTS.md](https://learn.chatgpt.com/docs/agent-configuration/agents-md), [app-server](https://learn.chatgpt.com/docs/app-server), [background hooks](https://learn.chatgpt.com/docs/hooks).
